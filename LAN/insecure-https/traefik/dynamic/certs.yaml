@@ -1,0 +1,4 @@
+tls:
+  certificates:
+    - certFile: "/etc/traefik/certs/opslab.crt"
+      keyFile:  "/etc/traefik/certs/opslab.key"

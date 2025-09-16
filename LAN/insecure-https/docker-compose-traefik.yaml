@@ -1,0 +1,100 @@
+services:
+  traefik:
+    image: traefik:3.5
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      # File provider (证书与 TLS 选项)
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      # EntryPoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # HTTP → HTTPS 跳转
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # 访问日志（可选）
+      - "--accesslog=true"
+      # Enable dashboard (optional)
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8090:8080"  # Traefik dashboard
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./traefik/dynamic:/etc/traefik/dynamic:ro"
+      - "./traefik/certs:/etc/traefik/certs:ro"
+    networks: [edge]
+
+  # headscale 服务（后端监听容器 8080）
+  headscale:
+    image: headscale/headscale:0.26.1
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    ports:
+      - '8080:8080'
+    volumes:
+      - './headscale-data:/var/lib/headscale'
+      - './headscale-config:/etc/headscale'
+    networks: [edge]
+    labels:
+      - "traefik.enable=true"
+      # 使用路径前缀 /headscale
+      - "traefik.http.routers.headscale.rule=PathPrefix(`/headscale`)"
+      - "traefik.http.routers.headscale.entrypoints=websecure"
+      - "traefik.http.routers.headscale.tls=true"
+      # 去掉 /headscale 前缀再转发给后端
+      - "traefik.http.middlewares.headscale-strip.stripprefix.prefixes=/headscale"
+      - "traefik.http.routers.headscale.middlewares=headscale-strip"
+      # 上游容器端口
+      - "traefik.http.services.headscale.loadbalancer.server.port=8080"
+
+  # headplane 服务（后端监听容器 3000）
+  headplane:
+    image: ghcr.io/tale/headplane:0.6.0
+    container_name: headplane
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    volumes:
+      - './config.yaml:/etc/headplane/config.yaml'
+      # This should match headscale.config_path in your config.yaml
+      - './headscale-config/config.yaml:/etc/headscale/config.yaml'
+
+      # If using dns.extra_records in Headscale (recommended), this should
+      # match the headscale.dns_records_path in your config.yaml
+      - './headscale-config/dns_records.json:/etc/headscale/dns_records.json'
+
+      # Headplane stores its data in this directory
+      - './headplane-data:/var/lib/headplane'
+
+      # If you are using the Docker integration, mount the Docker socket
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+ 
+    networks: [edge]
+    labels:
+      - "traefik.enable=true"
+      
+      # Main router for /admin path (HTTPS)
+      - "traefik.http.routers.headplane.rule=Host(`opslab`) && PathPrefix(`/admin`)"
+      - "traefik.http.routers.headplane.entrypoints=websecure"
+      - "traefik.http.routers.headplane.tls=true"
+      - "traefik.http.services.headplane.loadbalancer.server.port=3000"
+      
+      # Separate router for root path redirect
+      - "traefik.http.routers.headplane-redirect.rule=Host(`opslab`) && Path(`/`)"
+      - "traefik.http.routers.headplane-redirect.entrypoints=websecure"
+      - "traefik.http.routers.headplane-redirect.tls=true"
+      - "traefik.http.routers.headplane-redirect.middlewares=admin-redirect"
+      - "traefik.http.middlewares.admin-redirect.redirectregex.regex=^https://opslab/$$"
+      - "traefik.http.middlewares.admin-redirect.redirectregex.replacement=https://opslab/admin/"
+
+networks:
+  edge:
+    driver: bridge
