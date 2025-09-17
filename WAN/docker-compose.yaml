@@ -1,0 +1,125 @@
+services:
+  traefik:
+    image: traefik:3.5
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=web"
+      
+      # Entry points
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      
+      # HTTP to HTTPS redirect
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      
+      # Let's Encrypt configuration
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=user@group.io"  # use your mailbox
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-v02.api.letsencrypt.org/directory"
+      
+      # Enhanced logging for debugging
+      - "--log.level=DEBUG"
+      - "--accesslog=true"
+      - "--providers.docker.watch=true"
+    
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"  # Let's Encrypt certificates storage
+    
+    networks:
+      - web
+
+  headscale:
+    image: headscale/headscale:0.26.1
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    expose:
+      - "8080"
+        #- "50443"  # gRPC port for headplane communication
+    volumes:
+      - './headscale-data:/var/lib/headscale'
+      - './headscale-config:/etc/headscale'
+      - './curl-amd64:/usr/bin/curl'
+    networks:
+      - web
+    # health check
+    healthcheck:
+      test: ["CMD", "curl", "http://localhost:9090/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "me.tale.headplane.target=headscale"
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      
+      # Headscale API - hs.your-domain.xyz
+      - "traefik.http.routers.headscale.rule=Host(`hs.your-domain.xyz`)"
+      - "traefik.http.routers.headscale.entrypoints=websecure"
+      - "traefik.http.routers.headscale.tls.certresolver=letsencrypt"
+      
+      # backend
+      - "traefik.http.services.headscale.loadbalancer.server.port=8080"
+      - "traefik.http.services.headscale.loadbalancer.server.scheme=http"
+
+  headplane:
+    image: ghcr.io/tale/headplane:0.6.0
+    container_name: headplane
+    restart: unless-stopped
+    expose:
+      - "3000"
+    volumes:
+      - './config.yaml:/etc/headplane/config.yaml'
+      # This should match headscale.config_path in your config.yaml
+      - './headscale-config/config.yaml:/etc/headscale/config.yaml'
+
+      # If using dns.extra_records in Headscale (recommended), this should
+      # match the headscale.dns_records_path in your config.yaml
+      - './headscale-config/dns_records.json:/etc/headscale/dns_records.json'
+
+      # Headplane stores its data in this directory
+      - './headplane-data:/var/lib/headplane'
+
+      # If you are using the Docker integration, mount the Docker socket
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+    
+    networks:
+      - web
+    
+    labels:
+      - "traefik.enable=true"
+      
+      - "traefik.docker.network=web"
+      
+      # Main Headplane admin interface
+      - "traefik.http.routers.headplane.rule=Host(`cp.your-domain.xyz`) && PathPrefix(`/admin`)"
+      - "traefik.http.routers.headplane.entrypoints=websecure"
+      - "traefik.http.routers.headplane.tls.certresolver=letsencrypt"
+      - "traefik.http.services.headplane.loadbalancer.server.port=3000"
+      - "traefik.http.services.headplane.loadbalancer.server.scheme=http"
+      
+      # Root path redirect to /admin
+      - "traefik.http.routers.headplane-redirect.rule=Host(`cp.your-domain.xyz`) && Path(`/`)"
+      - "traefik.http.routers.headplane-redirect.entrypoints=websecure"
+      - "traefik.http.routers.headplane-redirect.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.headplane-redirect.middlewares=admin-redirect"
+      - "traefik.http.middlewares.admin-redirect.redirectregex.regex=^https://cp.your-domain.xyz/$$"
+      - "traefik.http.middlewares.admin-redirect.redirectregex.replacement=https://cp.your-domain.xyz/admin/"
+
+networks:
+  web:
+    name: web
+    driver: bridge
